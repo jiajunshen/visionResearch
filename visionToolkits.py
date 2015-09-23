@@ -1,3 +1,4 @@
+from __future__ import division, print_function, absolute_import
 import amitgroup as ag
 import pnet
 import caffe
@@ -5,7 +6,6 @@ import os
 import deepdish as dd
 import amitgroup as ag
 import amitgroup.plot as gr
-from __future__ import division, print_function, absolute_import
 import numpy as np
 import sys
 from pnet.bernoullimm import BernoulliMM
@@ -49,24 +49,24 @@ def load_mean_cifar10():
 def trainGaussian():
     training_seed = 1
     layers = [
-        pnet.OrientedGaussianPartsLayer(32,1,(5,5),settings=dict(outer_frame = 1,
-            em_seed=training_seed,
+        pnet.OrientedGaussianPartsLayer(32,4,(5,5),settings=dict(
+            seed=training_seed,
             n_init = 2,
-            threshold = 2,
             samples_per_image=40,
             max_samples=100000,
-            train_limit=20000,
-            rotation_spreading_radius = 0,
-            min_prob= 0.0005,
-        ))
+            channel_mode='together'
+            #covariance_type = ''
+        )),
+        pnet.PoolingLayer(shape=(8,8),strides=(2,2)),
+        pnet.SVMClassificationLayer(C=1.0)
     ]
     net = pnet.PartsNet(layers)
     trainingData, trainingLabel, testingData, testingLabel = load_mean_cifar10()
-    net.train(trainingData)
+    net.train(np.rollaxis(trainingData,1,4)/255.0, trainingLabel)
     return net
 
 
 
 if __name__ == "__main__":
     trainedNet = trainGaussian()
-    trainedNet.save("TrainedNet.npy")
+    trainedNet.save("TrainedNetNewRotation2.npy")

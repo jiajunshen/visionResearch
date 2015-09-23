@@ -10,6 +10,7 @@ import amitgroup.io
 import random
 import numpy
 import lmdb
+import h5py
 from sklearn.linear_model import SGDClassifier
 
 os.chdir("/Users/jiajunshen/Documents/Research/caffe/")
@@ -57,11 +58,11 @@ def assignmentParams(layerName, inputArray):
     global solver
     solver.net.params[layerName].data[...] = np.array(inputArray).reshape(solver.net.params[layerName].data.shape)
 
-def createLMDB(X, Y, dbName):
+def createLMDB(X, Y, dbName, order):
     N = X.shape[0]
     X = np.array(X, dtype=np.uint8)
     Y = np.array(Y, dtype=np.int64)
-
+    arr = order
     map_size = dd.bytesize(X) * 2
     env = lmdb.open(dbName, map_size=map_size)
 
@@ -70,8 +71,8 @@ def createLMDB(X, Y, dbName):
         datum.channels = X.shape[1]
         datum.height = X.shape[2]
         datum.width = X.shape[3]
-        datum.data = X[i].tobytes()  # or .tostring() if numpy < 1.9
-        datum.label = int(Y[i])
+        datum.data = X[arr[i]].tobytes()  # or .tostring() if numpy < 1.9
+        datum.label = int(Y[arr[i]])
         str_id = '{:08}'.format(i)
 
         with env.begin(write=True) as txn:
@@ -79,6 +80,68 @@ def createLMDB(X, Y, dbName):
             # The encode is only essential in Python 3
             txn.put(str_id.encode('ascii'), datum.SerializeToString())
 
+
+def createLMDBLabel(Y, dbName, order):
+    N = Y.shape[0]
+    Y = np.array(Y, dtype=np.int64)
+    arr = order
+    map_size = dd.bytesize(Y) * 100
+    env = lmdb.open(dbName, map_size=map_size)
+
+    for i in range(N):
+        datum = caffe.proto.caffe_pb2.Datum()
+        datum.channels = 1
+        datum.height = 1
+        datum.width = 1
+        datum.data = np.zeros((1,1,1)).tobytes()  # or .tostring() if numpy < 1.9
+        datum.label = int(Y[arr[i]])
+        str_id = '{:08}'.format(i)
+
+        with env.begin(write=True) as txn:
+            # txn is a Transaction object
+            # The encode is only essential in Python 3
+            txn.put(str_id.encode('ascii'), datum.SerializeToString())
+
+def createHDF5Label(Y, dbName, order):
+    N = Y.shape[0]
+    channel = 3;
+    height = 1
+    width = 1
+    total_size = N * channel * height * width
+
+    data = np.arange(total_size)
+    data = data.reshape(N, channel, height, width)
+    data = data.astype('float32')
+
+    # We had a bug where data was copied into label, but the tests weren't
+    # catching it, so let's make label 1-indexed.
+    label = Y[order]
+    label = label.astype('float32')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # We add an extra label2 dataset to test HDF5 layer's ability
+    # to handle arbitrary number of output ("top") Blobs.
+
+    print data
+    print label
+
+    with h5py.File(script_dir + '/' + dbName+'.h5', 'w') as f:
+        f['data1'] = data
+        f['label'] = label
+
+    with h5py.File(script_dir + '/' + dbName + '_gzip.h5', 'w') as f:
+        f.create_dataset(
+            'data1', data=data + total_size,
+            compression='gzip', compression_opts=1
+        )
+        f.create_dataset(
+            'label', data=label,
+            compression='gzip', compression_opts=1
+        )
+
+    with open(script_dir + '/sample_data_list' + dbName + '.txt', 'w') as f:
+        f.write(script_dir + '/' + dbName+'.h5\n')
+        f.write(script_dir + '/' + dbName + '_gzip.h5\n')
 
 def load_data():
     global trainingData
@@ -180,12 +243,14 @@ if __name__ == "__main__":
     Example of training the last layer with SVM
     """
 
+
     load_data()
 
     print("Preparing the activation from the last second conv layer")
     trainingActivation = getActivations("pool2", "training")# of size (50000, 32, 12, 12)
     testingActivation = getActivations("pool2", "testing")# of size (10000, 32, 12, 12)
 
+    #preparing the random partitioned labels
     alteredTrainingLabels = np.zeros((100, 50000))
     alteredTestingLabels = np.zeros((100, 10000))
     patchTrainingLabels = np.zeros((100, 50000 * 64))
@@ -198,11 +263,32 @@ if __name__ == "__main__":
         patchTestingLabels[:, i] = alteredTestingLabels[:, i//64]
 
     index = 0
-    trainingPatches = generatePatches(activationArray=trainingActivation, patchSize=5)
-    testingPatches = generatePatches(activationArray=testingActivation, patchSize=5)
-    print trainingPatches.shape, patchTrainingLabels.shape, testingPatches, patchTestingLabels.shape
-    createLMDB(X = trainingPatches, Y = patchTrainingLabels[index], dbName="cifar10_patch_train_lmdb%d" %index)
-    createLMDB(X = testingPatches, Y = patchTestingLabels[index], dbName="cifar10_patch_test_lmdb%d" %index)
+    disablePatchLearning = 0
+    if not disablePatchLearning:
+        trainingPatches = generatePatches(activationArray=trainingActivation, patchSize=5)
+        trainingPatchesMean = np.mean(trainingPatches,axis = 0)
+        trainingPatches = trainingPatches - trainingPatchesMean
+        testingPatches = generatePatches(activationArray=testingActivation, patchSize=5)
+        testingPatches = testingPatches - trainingPatchesMean
+        print trainingPatches.shape, patchTrainingLabels.shape, testingPatches, patchTestingLabels.shape
+    N_train = trainingPatches.shape[0]
+    N_test = testingPatches.shape[0]
+    training_order = np.arange(N_train)
+    testing_order = np.arange(N_test)
+    np.random.shuffle(training_order)
+    np.random.shuffle(testing_order)
+    createLMDB(X = trainingPatches, Y = patchTrainingLabels[index], dbName="cifar10_patch_train_lmdb%d" %index, order = training_order)
+    createLMDB(X = testingPatches, Y = patchTestingLabels[index], dbName="cifar10_patch_test_lmdb%d" %index, order = testing_order)
+
+    #for index in range(100):
+    #    print index
+    #    createLMDBLabel(Y = patchTrainingLabels[index], dbName = "cifar10_patch_train_label_lmdb%d" %index)
+    #    createLMDBLabel(Y = patchTestingLabels[index], dbName = "cifar10_patch_test_label_lmdb%d" %index)
+
+    for index in range(100):
+        print index
+        createHDF5Label(Y = patchTrainingLabels[index], dbName="cifar10_patch_train_lmdb%d" %index, order = training_order)
+        createHDF5Label(Y = patchTestingLabels[index], dbName="cifar10_patch_test_lmdb%d" %index, order = testing_order)
 
     """
     clf2 = SGDClassifier(loss='hinge',random_state = 0,verbose=True) # shuffle=True is useless here
